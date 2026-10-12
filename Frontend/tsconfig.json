@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES6",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "typeRoots": ["./node_modules/@types", "./src/types"],
+    "lib": ["ES2020", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src/**/*", "src/App.tsx"],
+  "exclude": ["node_modules"]
+}

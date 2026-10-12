@@ -1,0 +1,481 @@
+import "./SendMail.scss";
+import InputEmail from "../../components/InputEmail/InputEmail";
+import Input from "../../components/Input/Input";
+import Textarea from "../../components/Textarea/Textarea";
+import Button from "../../components/Button/Button";
+import { NotificationManager } from "../NotificationManager/NotificationManager";
+import ConfirmationDialog from "../../widgets/ConfirmationDialog/ConfirmationDialog";
+import HorizontalScroller from "../../components/HorizontalScroller/HorizontalScroller";
+import { sendEmail, replyToEmail } from "../../api/ApiEmail";
+import { uploadAttachment, deleteAttachments } from "../../api/ApiAttachments";
+import { AppStorage } from "../../App";
+import { createDraft, sendDraft, updateDraft } from "../../api/ApiDraft";
+import { formatFileSize, getIconByContentType, trimFileName } from "../../utils/files";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+interface SendMailProps {
+    backToMail: () => void;
+    actionData?: {
+        type: "reply" | "forward";
+        subject?: string;
+        body?: string;
+        to?: string;
+        originalEmail?: any;
+    };
+}
+
+interface FileItem {
+    id: number;
+    file: File | null;
+    name: string;
+    size: number;
+    type: string;
+    uploaded: boolean;
+    attachmentId?: number;
+}
+
+// function isFormValid(body: string, receivers: string[], invalidReceivers: string[], replyingToAnonymous: boolean): boolean {
+//     return body.trim().length > 0 && (receivers.length > 0 || replyingToAnonymous) && (invalidReceivers || []).length === 0;
+// }
+
+export default function SendMail(props: SendMailProps) {
+    const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+    const [header, setHeader] = useState("");
+    const [body, setBody] = useState("");
+    const [receivers, setReceivers] = useState<string[]>([]);
+    const [invalidReceivers, setInvalidReceivers] = useState<string[]>([]);
+    const [files, setFiles] = useState<FileItem[]>([]);
+    const [draftId, setDraftId] = useState<number | null>(null);
+    const [emailId] = useState<number | null>(AppStorage.emailReplyingId || null);
+    const [uploadingFiles, setUploadingFiles] = useState(false);
+    const [sending, setSending] = useState(false);
+    const [isAnonymous, setIsAnonymous] = useState(false);
+    const [replyingToAnonymous] = useState<boolean>(AppStorage.replyingToAnonymous ?? false);
+    const [showDraftConfirm, setShowDraftConfirm] = useState(false);
+
+    useEffect(() => {
+        const draftData = AppStorage.getDraftData();
+        const { actionData } = props;
+
+        if (actionData) {
+            if (actionData.type === "reply") {
+                setHeader(actionData.subject || "");
+                setBody(actionData.body || "");
+                setReceivers(actionData.to ? [actionData.to] : []);
+            } else if (actionData.type === "forward") {
+                setHeader(actionData.subject || "");
+                setBody(actionData.body || "");
+                setReceivers([]);
+            }
+            return;
+        }
+
+        if (draftData) {
+            setHeader(draftData.header || "");
+            setBody(draftData.body || "");
+            setReceivers(draftData.receivers || []);
+            setDraftId(draftData.id || null);
+        }
+    }, []);
+
+    const isFormValid = (body: string, receivers: string[], invalidReceivers: string[], replyingToAnonymous: boolean): boolean => {
+        return body.trim().length > 0 && (receivers.length > 0 || replyingToAnonymous) && (invalidReceivers || []).length === 0;
+    };
+
+    // const fetchDraftAttachments = async () => {
+    //     if (!draftId) return;
+
+    //     try {
+    //         const data = await getAttachments(draftId);
+
+    //         if (!data) return;
+
+    //         let attachmentsArray = [];
+    //         if (Array.isArray(data)) {
+    //             attachmentsArray = data;
+    //         } else if (data && Array.isArray(data.attachments)) {
+    //             attachmentsArray = data.attachments;
+    //         } else if (data && Array.isArray(data.data)) {
+    //             attachmentsArray = data.data;
+    //         } else if (data && typeof data === "object") {
+    //             attachmentsArray = [data];
+    //         }
+
+    //         const draftFiles = attachmentsArray.map((att: any) => ({
+    //             id: att.id || Math.random(),
+    //             name: att.file_name || att.fileName,
+    //             size: att.size_bytes || att.sizeBytes,
+    //             type: att.content_type || att.contentType || "application/octet-stream",
+    //             attachmentId: att.id,
+    //             uploaded: true,
+    //             file: null,
+    //         }));
+
+    //         setFiles((prev) => [...prev, ...draftFiles]);
+    //     } catch (err) {
+    //         console.error("Failed to fetch draft attachments", err);
+    //     }
+    // };
+
+    const handleSubmit = async (e: any) => {
+        e.preventDefault();
+
+        setSending(true);
+        let responseSend;
+
+        if (replyingToAnonymous && emailId != null) {
+            responseSend = await replyToEmail(emailId, {
+                header: header.trim(),
+                body: body.trim(),
+                files: files.map((f: any) => f.file),
+                is_anonymous: isAnonymous,
+            });
+        } else if (draftId) {
+            await updateDraft(
+                {
+                    header: header.trim(),
+                    body: body.trim(),
+                    receivers: receivers,
+                },
+                draftId,
+            );
+
+            uploadFiles(draftId);
+            responseSend = await sendDraft(
+                {
+                    header: header.trim(),
+                    body: body.trim(),
+                    receivers: receivers,
+                    is_anonymous: isAnonymous || replyingToAnonymous,
+                },
+                draftId,
+            );
+        } else {
+            responseSend = await sendEmail({
+                header: header.trim(),
+                body: body.trim(),
+                receivers: receivers,
+                files: files.map((f: any) => f.file),
+                is_anonymous: isAnonymous,
+            });
+        }
+
+        if (!responseSend.error) {
+            AppStorage.clearMailActionData();
+            props.backToMail();
+            NotificationManager.show(true, "message_sent");
+        } else {
+            setSending(false);
+            if (responseSend.error.includes("recipient not found")) {
+                NotificationManager.show(false, "recipient_not_found");
+            } else if (responseSend.error.includes("some recipients do not accept anonymous emails")) {
+                NotificationManager.show(false, "anonymous_forbidden");
+            } else {
+                NotificationManager.show(false, "email_send_error");
+            }
+        }
+    };
+
+    const buttonBlock = useMemo(
+        () => !isFormValid(body, receivers, invalidReceivers, replyingToAnonymous),
+        [body, receivers, invalidReceivers, replyingToAnonymous],
+    );
+
+    const handleCancel = () => {
+        AppStorage.clearMailActionData();
+        setShowDraftConfirm(false);
+        props.backToMail();
+    };
+
+    const handleSaveDraft = async () => {
+        let savedDraftId: number | null = null;
+
+        if (draftId) {
+            const response = await updateDraft(
+                {
+                    header: header.trim(),
+                    body: body.trim(),
+                    receivers: receivers,
+                },
+                draftId,
+            );
+
+            if (response) {
+                savedDraftId = draftId;
+            }
+        } else {
+            if (header === "" && body === "" && receivers.length === 0 && files.length === 0) {
+                props.backToMail();
+                return;
+            }
+            const response = await createDraft({
+                header: header.trim(),
+                body: body.trim(),
+                receivers: receivers,
+            });
+
+            if (response) {
+                savedDraftId = response.id;
+            }
+        }
+
+        if (savedDraftId && files.length > 0) {
+            await uploadFiles(savedDraftId);
+        }
+
+        if (savedDraftId) {
+            AppStorage.clearMailActionData();
+            props.backToMail();
+            NotificationManager.show(true, "draft_saved");
+        }
+
+        setShowDraftConfirm(false);
+    };
+
+    const handleFileChange = (e: any) => {
+        const newFiles: File[] = Array.from(e.target.files || []);
+
+        if (fileInputRef.current) {
+            fileInputRef.current.value = "";
+        }
+
+        if (newFiles.length === 0) return;
+
+        const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB
+        const validFiles = newFiles.filter((file) => {
+            if (file.size > MAX_FILE_SIZE) {
+                NotificationManager.show(false, "file_too_large");
+                return false;
+            }
+            return true;
+        });
+
+        if (validFiles.length === 0) return;
+
+        const processedFiles = validFiles.map((file: File) => ({
+            file: file,
+            id: Date.now() + Math.random(),
+            name: file.name,
+            size: file.size,
+            type: file.type,
+            uploaded: false,
+        }));
+
+        setFiles((prev) => [...processedFiles, ...prev]);
+    };
+
+    const handleFileButtonClick = () => {
+        fileInputRef.current?.click();
+    };
+
+    const removeFile = async (fileId: number) => {
+        const fileItem = files.find((f: any) => f.id === fileId);
+        if (!fileItem) return;
+
+        if (fileItem.uploaded && fileItem.attachmentId && draftId) {
+            try {
+                await deleteAttachments(draftId, [fileItem.attachmentId]);
+            } catch (err) {
+                console.error("Failed to delete attachment", err);
+            }
+        }
+
+        setFiles((prev) => prev.filter((f) => f.id !== fileId));
+    };
+
+    const uploadFiles = useCallback(
+        async (emailIdParam: number): Promise<boolean> => {
+            const newFiles = files.filter((f) => !f.uploaded);
+            if (newFiles.length === 0) return true;
+
+            setUploadingFiles(true);
+            setSending(true);
+
+            try {
+                const uploadPromises = newFiles.map((fileItem) => uploadAttachment(emailIdParam, fileItem.file!));
+                const results = await Promise.all(uploadPromises);
+                const allSuccessful = results.every((result) => result !== null);
+
+                if (!allSuccessful) {
+                    NotificationManager.show(false, "file_upload_error");
+                    return false;
+                }
+                return true;
+            } catch {
+                NotificationManager.show(false, "file_upload_error");
+                return false;
+            } finally {
+                setUploadingFiles(false);
+                setSending(false);
+            }
+        },
+        [files],
+    );
+
+    const handleMobileCloseButton = () => {
+        if (header === "" && body === "" && receivers.length === 0 && files.length === 0) {
+            handleCancel();
+            return;
+        }
+
+        setShowDraftConfirm(true);
+    };
+
+    const handleSetAnonymous = () => {
+        setIsAnonymous(!isAnonymous);
+    };
+
+    const t = (key: string): string => AppStorage.t(key);
+
+    const isMobile = window.innerWidth < 769;
+
+    return (
+        <div className="send-mail">
+            {isMobile ? (
+                sending ? (
+                    <div className="send-mail-mobile-buttons">
+                        <div className="close-button"></div>
+                        <div className="sending-loader">
+                            <div className="spinner" />
+                        </div>
+                    </div>
+                ) : (
+                    <div className="send-mail-mobile-buttons">
+                        <Button className="close-button" onClick={handleMobileCloseButton}></Button>
+                        <Button
+                            className="send-button"
+                            block={buttonBlock}
+                            onClick={(event: any) => {
+                                handleSubmit(event);
+                            }}></Button>
+                    </div>
+                )
+            ) : null}
+            <div className="send-mail-header">
+                <span className="send-mail-header__text">{t("new_letter")}</span>
+            </div>
+            <form action="" className="send-form">
+                <div className="send-inputs">
+                    {replyingToAnonymous ? (
+                        <span className="input-container" data-name="anonymous">
+                            {t("to")}
+                            {"\t"}
+                            {t("anonymous")}
+                        </span>
+                    ) : (
+                        <InputEmail
+                            input_title={t("to")}
+                            placeholder={t("enter_email")}
+                            emails={receivers}
+                            onChange={(emails, invalid) => {
+                                setReceivers(emails);
+                                setInvalidReceivers(invalid);
+                            }}
+                        />
+                    )}
+                    <Input
+                        type="text"
+                        placeholder={t("enter_subject")}
+                        input_title={t("subject")}
+                        name="theme"
+                        maxLength={255}
+                        value={header}
+                        onInput={(e: React.FormEvent<HTMLInputElement>) => setHeader((e.target as HTMLInputElement).value)}
+                    />
+                </div>
+                {files.length > 0 ? (
+                    <HorizontalScroller className="files-list">
+                        {files.map((fileItem: any) => (
+                            <div key={fileItem.id} className="file-item">
+                                <div className={`file-icon ${getIconByContentType(fileItem.type)}`} />
+                                <div className="file-info">
+                                    <span className="file-name">{trimFileName(fileItem.name)}</span>
+                                    <span className="file-size">{formatFileSize(fileItem.size)}</span>
+                                </div>
+                                <div
+                                    className={`file-remove-btn ${uploadingFiles ? "disabled" : ""}`}
+                                    onClick={() => removeFile(fileItem.id)}
+                                />
+                            </div>
+                        ))}
+                    </HorizontalScroller>
+                ) : null}
+                {isMobile && (
+                    <div className="anonymous-radio">
+                        <input
+                            id="anon-toggle"
+                            type="checkbox"
+                            name="radio-anonymous"
+                            checked={isAnonymous}
+                            onChange={handleSetAnonymous}
+                        />
+                        <label htmlFor="anon-toggle">{t("toggle_anon")}</label>
+                    </div>
+                )}
+                <Textarea
+                    readonly={false}
+                    value={body}
+                    onInput={(e: React.FormEvent<HTMLTextAreaElement>) => setBody((e.target as HTMLTextAreaElement).value)}
+                />
+            </form>
+            <div className="send-down">
+                <div className="send-tools">
+                    <input
+                        type="file"
+                        ref={fileInputRef}
+                        hidden
+                        multiple
+                        onChange={handleFileChange}
+                        accept="*/*"
+                        disabled={uploadingFiles}
+                        title={t("add_attachment")}
+                    />
+                    <div className="upload-attachments-button" onClick={handleFileButtonClick} />
+                </div>
+                {!isMobile ? (
+                    sending ? (
+                        <div className="send-actions">
+                            <div className="sending-loader">
+                                <div className="spinner" />
+                                <span>{t("sending")}...</span>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="send-actions">
+                            <div className="anonymous-radio">
+                                <input
+                                    id="anon-toggle"
+                                    type="checkbox"
+                                    name="radio-anonymous"
+                                    checked={isAnonymous}
+                                    onChange={handleSetAnonymous}
+                                />
+                                <label htmlFor="anon-toggle">{t("toggle_anon")}</label>
+                            </div>
+                            <Button title={t("save")} name="save-mail" onClick={handleSaveDraft} block={sending} />
+                            <Button
+                                title={t("send")}
+                                name="send-mail"
+                                block={buttonBlock || sending}
+                                onClick={(event: any) => {
+                                    handleSubmit(event);
+                                }}
+                            />
+                        </div>
+                    )
+                ) : null}
+            </div>
+            {showDraftConfirm && (
+                <ConfirmationDialog
+                    text={t("confirm_save_draft")}
+                    cancelButtonTitle={t("delete_draft")}
+                    confirmButtonTitle={t("save_draft")}
+                    callbackCancel={handleCancel}
+                    callbackConfirm={handleSaveDraft}
+                    highlightCancel={false}
+                />
+            )}
+        </div>
+    );
+}
